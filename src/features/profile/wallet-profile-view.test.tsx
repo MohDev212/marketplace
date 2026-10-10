@@ -315,6 +315,48 @@ describe("WalletProfileView", () => {
       { enabled: true },
     );
   });
+
+  it("filters_to_supported_collections_only_and_uses_catalog_name_hints", async () => {
+    const user = userEvent.setup();
+    mockUseWalletPortfolioQuery.mockReturnValue({
+      data: {
+        page: {
+          balances: [
+            {
+              contract_address: "0xcollection-a",
+              token_id: "7",
+              balance: "1",
+            },
+            {
+              contract_address: "0xdiscovered-nft",
+              collection_name: "Discovered Loot",
+              token_id: "42",
+              balance: "1",
+            },
+          ],
+        },
+      },
+      status: "ready",
+      error: null,
+      isFetching: false,
+      refresh: vi.fn(),
+    });
+
+    render(<WalletProfileView address="0xabc123" />);
+
+    expect(screen.getByText("Golden Token")).toBeVisible();
+    expect(screen.getByText("Discovered Loot")).toBeVisible();
+
+    await user.click(
+      screen.getByRole("combobox", { name: /filter by collection/i }),
+    );
+    await user.click(
+      screen.getByRole("option", { name: "Supported collections only" }),
+    );
+
+    expect(screen.getByText("Golden Token")).toBeVisible();
+    expect(screen.queryByText("Discovered Loot")).toBeNull();
+  });
 });
 
 vi.mock("@starknet-react/core",()=>({useAccount:()=>({address:undefined})}));

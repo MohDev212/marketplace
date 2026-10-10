@@ -28,6 +28,7 @@ type WalletProfileViewProps = {
 
 type PortfolioItem = {
   collectionAddress: string;
+  collectionNameHint?: string;
   tokenId: string;
   balance: string;
 };
@@ -36,6 +37,7 @@ type CollectionGroup = {
   collectionAddress: string;
   collectionName: string;
   projectId?: string;
+  isConfigured: boolean;
   tokenIds: string[];
 };
 
@@ -45,6 +47,7 @@ const DENSITY_OPTIONS: ReadonlyArray<readonly [GridDensityMode, string]> = [
   ["compact", "Compact"],
 ];
 const ALL_COLLECTIONS_VALUE = "__all_collections__";
+const SUPPORTED_COLLECTIONS_VALUE = "__supported_collections__";
 
 function asRecord(value: unknown) {
   return value && typeof value === "object"
@@ -72,6 +75,10 @@ function parsePortfolioItems(data: unknown): PortfolioItem[] {
       (typeof record.contract_address === "string" && record.contract_address) ||
       (typeof record.contractAddress === "string" && record.contractAddress) ||
       null;
+    const collectionNameHint =
+      (typeof record.collection_name === "string" && record.collection_name) ||
+      (typeof record.collectionName === "string" && record.collectionName) ||
+      undefined;
     const tokenId = formatNumberish(record.token_id ?? record.tokenId);
     const balance = formatNumberish(record.balance) ?? "0";
     if (!collectionAddress || !tokenId) continue;
@@ -86,6 +93,7 @@ function parsePortfolioItems(data: unknown): PortfolioItem[] {
 
     items.push({
       collectionAddress,
+      collectionNameHint,
       tokenId,
       balance,
     });
@@ -111,8 +119,12 @@ function groupByCollection(
     const configuredCollection = configuredCollectionsByAddress.get(normalizedAddress);
     map.set(normalizedAddress, {
       collectionAddress: item.collectionAddress,
-      collectionName: configuredCollection?.name ?? item.collectionAddress,
+      collectionName:
+        configuredCollection?.name ??
+        item.collectionNameHint ??
+        item.collectionAddress,
       projectId: configuredCollection?.projectId,
+      isConfigured: Boolean(configuredCollection),
       tokenIds: [item.tokenId],
     });
   }
@@ -181,16 +193,19 @@ export function WalletProfileView({
     const normalized = deferredFilter.trim().toLowerCase();
 
     return collections
-      .filter(
-        ({ collectionAddress }) =>
-          selectedCollection === ALL_COLLECTIONS_VALUE ||
+      .filter(({ collectionAddress, isConfigured }) => {
+        if (selectedCollection === ALL_COLLECTIONS_VALUE) return true;
+        if (selectedCollection === SUPPORTED_COLLECTIONS_VALUE) return isConfigured;
+        return (
           normalizeMarketplaceAddress(collectionAddress) ===
-            normalizeMarketplaceAddress(selectedCollection),
-      )
-      .map(({ collectionAddress, collectionName, projectId, tokenIds }) => ({
+          normalizeMarketplaceAddress(selectedCollection)
+        );
+      })
+      .map(({ collectionAddress, collectionName, projectId, isConfigured, tokenIds }) => ({
         collectionAddress,
         collectionName,
         projectId,
+        isConfigured,
         tokenIds:
           normalized.length === 0 ||
           collectionName.toLowerCase().includes(normalized)
@@ -258,6 +273,9 @@ export function WalletProfileView({
                 <SelectContent>
                   <SelectItem value={ALL_COLLECTIONS_VALUE}>
                     All collections
+                  </SelectItem>
+                  <SelectItem value={SUPPORTED_COLLECTIONS_VALUE}>
+                    Supported collections only
                   </SelectItem>
                   {collectionOptions.map((collection) => (
                     <SelectItem key={collection.value} value={collection.value}>

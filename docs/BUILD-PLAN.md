@@ -865,3 +865,5 @@ Unresolved release inputs: initial administrator and transaction fee ceiling; ST
 - [Existing-system assessment](./INDEXER-CURRENT-STATE-2026-10-06.md) and [contract findings](./CONTRACT-ASSESSMENT-2026-10-06.md): historical evidence, not current implementation instructions.
 
 This master plan controls release scope and delivery status. Contract/backend documents provide detailed design; dated assessments and the OpenSea comparison preserve evidence and do not override the current plan.
+
+The [10 October bounded mainnet/recovery measurements](evidence/2026-10-10-nft-mainnet-shadow-measurements.md) record actual captured windows, sampled compatibility, local write/RPC costs, controlled recovery and proposed backfill budgets. They leave full history, sustained production targets and owner acceptance open.

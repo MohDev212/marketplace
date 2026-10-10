@@ -1,6 +1,8 @@
 import { marketStatus } from "./status.mjs";
 import { createHash } from "node:crypto";
 import { address, uint, boundedInteger, ApiError } from "./domain.mjs";
+import { collectionKey } from "./collection-catalog.mjs";
+import { collectionVisible, publicChainState } from "./catalog-state.mjs";
 const j = (alias, path) => `json_extract(${alias}.body,'$.${path}')`;
 function filtersSql(options, params, omit) {
   const clauses = [];
@@ -77,16 +79,43 @@ export class Catalog {
     this.config = config;
   }
   assertVisible(collection) {
-    if (
-      this.store.app
-        .prepare("SELECT 1 FROM moderation WHERE collection=?")
-        .get(address(collection))
-    )
+    if (!this.isVisible(collection))
       throw new ApiError(
         "CONTENT_RESTRICTED",
         "Collection is restricted pending review.",
         404,
       );
+  }
+  isVisible(raw) {
+    const a = address(raw),
+      record = this.config.chainId ? this.store.get("catalog_collection", collectionKey(this.config.chainId, a)) : null,
+      row = this.config.chainId ? this.store.app.prepare("SELECT value FROM app_meta WHERE key=?")
+        .get(`catalog_visibility:${collectionKey(this.config.chainId, a)}`) : null;
+    return collectionVisible(this.config, a, {
+      registered: this.store.get("collection", a), record,
+      visibility: row ? JSON.parse(row.value) : null,
+      restricted: !!this.store.app.prepare("SELECT 1 FROM moderation WHERE collection=?").get(a),
+    });
+  }
+  standard(raw) {
+    return this.config.chainId
+      ? this.store.get("catalog_collection", collectionKey(this.config.chainId, address(raw)))?.standard
+      : null;
+  }
+  visibleAddresses(standard) {
+    const addresses = new Set(this.store.list("collection").map((c) => c.address));
+    for (const record of this.store.list("catalog_collection"))
+      if (!this.config.chainId || record.id === collectionKey(this.config.chainId, record.address)) addresses.add(record.address);
+    for (const c of this.config.collections ?? []) addresses.add(address(c.address));
+    return [...addresses].filter((a) => this.isVisible(a) &&
+      (!standard || !["ERC721", "ERC1155"].includes(this.standard(a)) || this.standard(a) === standard));
+  }
+  withSources(page, collection) {
+    const sources = [...new Set([
+      ...(collection ? [address(collection)] : []),
+      ...page.items.map((item) => item.collection),
+    ])].slice(0, 100).map((a) => ({ collection: a, ...this.chainState(a) }));
+    return { ...page, sourceScope: "page", sources };
   }
   page(sql, params, { limit, cursor, scope, descending = false }) {
     const count = boundedInteger(limit),
@@ -127,22 +156,16 @@ export class Catalog {
         ...(row.best ? { bestListing: JSON.parse(row.best) } : {}),
       })),
       nextCursor,
+      basis: "indexed",
+      generation,
     };
   }
   tokenWhere(collection, options = {}, omit) {
     if (collection) this.assertVisible(collection);
     const params = [],
       clauses = ["t.kind='token'", `COALESCE(${j("t", "burned")},0)=0`];
-    const hidden = this.store.app
-      .prepare("SELECT collection FROM moderation")
-      .all()
-      .map((r) => r.collection);
-    if (hidden.length) {
-      clauses.push(
-        `${j("t", "collection")} NOT IN (SELECT value FROM json_each(?))`,
-      );
-      params.push(JSON.stringify(hidden));
-    }
+    clauses.push(`${j("t", "collection")} IN (SELECT value FROM json_each(?))`);
+    params.push(JSON.stringify(this.visibleAddresses("ERC721")));
     if (collection) {
       clauses.push(`${j("t", "collection")}=?`);
       params.push(address(collection));
@@ -226,18 +249,22 @@ export class Catalog {
       q: options.q,
       tokenIds: options.tokenIds,
     };
-    return this.page(sql, [...prefix, ...subParams, ...params], {
+    const page = this.page(sql, [...prefix, ...subParams, ...params], {
       ...options,
       scope,
       descending: sort.endsWith("desc") || sort === "recent",
     });
+    return this.withSources(page, collection);
   }
   token(collection, id) {
     this.assertVisible(collection);
+    if (this.standard(collection) === "ERC1155")
+      throw new ApiError("NOT_FOUND", "ERC721 token not indexed.", 404);
     const row = this.store.get("token", `${address(collection)}:${uint(id)}`);
     if (!row) throw new ApiError("NOT_FOUND", "Token not indexed.", 404);
     return {
       ...row,
+      ...this.chainState(collection),
       listings: this.orders(collection, {
         tokenId: id,
         kind: "listing",
@@ -248,10 +275,39 @@ export class Catalog {
   holdings(account, options = {}) {
     return this.tokens(options.collection, { ...options, owner: account });
   }
+  balances(account, options = {}) {
+    if (options.collection) this.assertVisible(options.collection);
+    if (options.sort && !["token-asc", "token-desc"].includes(options.sort))
+      throw new ApiError("INVALID_QUERY", "Balances support token-asc or token-desc.");
+    const params = [address(account), JSON.stringify(this.visibleAddresses("ERC1155"))],
+      clauses = ["b.kind='erc1155_balance'", `${j("b", "owner") }=?`,
+        `${j("b", "balance")}!='0'`, `${j("b", "collection")} IN (SELECT value FROM json_each(?))`];
+    if (options.collection) { clauses.push(`${j("b", "collection")}=?`); params.push(address(options.collection)); }
+    if (options.collections) {
+      if (!Array.isArray(options.collections) || options.collections.length > 100)
+        throw new ApiError("INVALID_QUERY", "At most 100 collections.");
+      clauses.push(`${j("b", "collection")} IN (SELECT value FROM json_each(?))`);
+      params.push(JSON.stringify(options.collections.map(address)));
+    }
+    if (options.tokenIds) {
+      if (!Array.isArray(options.tokenIds) || options.tokenIds.length > 100)
+        throw new ApiError("INVALID_QUERY", "Invalid token IDs.");
+      clauses.push(`${j("b", "tokenId")} IN (SELECT value FROM json_each(?))`);
+      params.push(JSON.stringify(options.tokenIds.map((id) => uint(id))));
+    }
+    const page = this.page(`SELECT b.id,json_patch(b.body,json_object('id',b.id,'standard','ERC1155',
+      'metadata',json('{}'),'attributes',json('[]'))) AS body,b.num_key AS sort_value FROM entities b
+      WHERE ${clauses.join(" AND ")}`, params, { ...options, descending: options.sort === "token-desc",
+      scope: { ...options, resource: "balances", owner: address(account), cursor: undefined, limit: undefined } });
+    return this.withSources({ ...page, standard: "ERC1155", items: page.items.map((b) => ({ ...b,
+      ...this.store.get("token_metadata", `${b.collection}:${b.tokenId}`) })) }, options.collection);
+  }
   orders(collection, options = {}) {
     if (collection) this.assertVisible(collection);
     const params = [],
       clauses = ["o.kind='order'"];
+    clauses.push(`${j("o", "collection")} IN (SELECT value FROM json_each(?))`);
+    params.push(JSON.stringify(this.visibleAddresses()));
     for (const [key, value] of Object.entries({
       collection: collection ? address(collection) : undefined,
       tokenId: options.tokenId != null ? uint(options.tokenId) : undefined,
@@ -366,26 +422,25 @@ export class Catalog {
     return [...groups.values()];
   }
   collections() {
-    return this.store
-      .list("collection")
-      .filter(
-        (c) =>
-          !this.store.app
-            .prepare("SELECT body FROM moderation WHERE collection=?")
-            .get(c.address),
-      )
-      .map((c) => this.collection(c.address));
+    return this.visibleAddresses().sort().slice(0, 1000).map((a) => this.collection(a));
   }
   collection(raw) {
     this.assertVisible(raw);
     const a = address(raw),
-      c = this.store.get("collection", a);
-    if (!c) throw new ApiError("NOT_FOUND", "Collection not registered.", 404);
+      saved = this.store.get("collection", a),
+      record = this.config.chainId ? this.store.get("catalog_collection", collectionKey(this.config.chainId, a)) : null,
+      c = saved ?? (record ? { address: a, name: record.classification?.name ?? a } : null);
+    if (!c) throw new ApiError("NOT_FOUND", "Collection not indexed.", 404);
     const tokens = this.store.db
       .prepare(
-        "SELECT COUNT(*) AS count FROM entities WHERE kind='token' AND json_extract(body,'$.collection')=? AND COALESCE(json_extract(body,'$.burned'),0)=0",
+        `SELECT COUNT(DISTINCT json_extract(body,'$.tokenId')) AS count FROM entities
+          WHERE kind IN ('token','erc1155_balance') AND json_extract(body,'$.collection')=?
+          AND COALESCE(json_extract(body,'$.burned'),0)=0
+          AND (kind='token' OR json_extract(body,'$.balance')!='0')
+          AND (? IS NULL OR kind=?)`,
       )
-      .get(a).count;
+      .get(a, ["ERC721", "ERC1155"].includes(record?.standard) ? record.standard : null,
+        record?.standard === "ERC1155" ? "erc1155_balance" : "token").count;
     const floors = [];
     let listingCount = 0;
     for (const currency of this.config.currencies ?? []) {
@@ -413,15 +468,114 @@ export class Catalog {
       .get(`verification:${a}`);
     return {
       ...c,
+      ...this.chainState(a),
       verified: verification ? JSON.parse(verification.value).verified : false,
       tokenCount: String(tokens),
       listingCount: String(listingCount),
       floorByCurrency: floors,
     };
   }
+  /** Indexed provenance for one collection: live source coverage plus the
+   *  chain-derived discovery/classification record. Additive — existing
+   *  consumers keep every field they already read. */
+  chainState(raw) {
+    const a = address(raw);
+    const progress = this.store.get("progress", a) ?? null;
+    const record = this.config.chainId
+      ? (this.store.get(
+          "catalog_collection",
+          collectionKey(this.config.chainId, a),
+        ) ?? null)
+      : null;
+    const saved = this.config.chainId ? this.store.get("source_coverage", collectionKey(this.config.chainId, a)) : null,
+      checkpoint = saved?.mode !== "configured_scan" && saved ? saved.block : progress?.block;
+    return publicChainState(this.config, a, {
+      record, saved, progress, rpc: this.store.get("status", "rpc"),
+      generation: this.store.generation(),
+      canonicalHash: checkpoint != null ? this.store.canonicalBlock(checkpoint)?.hash : null,
+      reconciliation: this.store.get("status", `reconciliation:${a}`),
+    });
+  }
+  /** Operator coverage report (#116): every chain record with an explicit
+   *  reason for anything unsupported, quarantined or unproven, plus
+   *  registered collections that still have no coverage. */
+  coverage() {
+    const records = this.store.list("catalog_collection");
+    const entries = records.map((record) => {
+      const evidence = record.classification?.evidence;
+      const reason =
+        record.state === "unsupported"
+          ? (evidence?.reason ??
+            record.classification?.uncertainty ??
+            "unsupported contract type")
+          : record.state === "failed"
+            ? (record.quarantine?.last?.message ??
+              record.classification?.uncertainty ??
+              "classification failed")
+            : null;
+      return {
+        address: record.address,
+        state: record.state,
+        standard: record.standard ?? null,
+        method: record.classification?.method ?? null,
+        reason,
+        quarantine: record.quarantine
+          ? {
+              observations: record.quarantine.observations,
+              last: record.quarantine.last,
+            }
+          : null,
+        ...(record.gaps?.length ? { gaps: record.gaps } : {}),
+      };
+    });
+    const notIndexed = (this.config.collections ?? [])
+      .map((c) => ({
+        address: address(c.address),
+        startBlock: c.startBlock ?? null,
+      }))
+      .filter((c) => this.store.get("progress", c.address)?.block == null);
+    const counts = {};
+    for (const entry of entries)
+      counts[entry.state] = (counts[entry.state] ?? 0) + 1;
+    return {
+      counts,
+      unsupported: entries.filter((entry) => entry.state === "unsupported"),
+      quarantined: entries.filter((entry) => entry.quarantine),
+      notIndexed,
+      records: entries,
+    };
+  }
+  /** Chain-scope (full-chain) discovery results, clearly labeled so search
+   *  consumers never mistake them for indexed holdings. */
+  discoveredCollections(q) {
+    const needle = typeof q === "string" ? q.trim().toLowerCase() : "";
+    return this.store
+      .list("catalog_collection")
+      .filter((record) => ["ERC721", "ERC1155"].includes(record.standard) && this.isVisible(record.address))
+      .filter(
+        (record) =>
+          !needle ||
+          String(record.address).toLowerCase().includes(needle) ||
+          String(record.classification?.name ?? "")
+            .toLowerCase()
+            .includes(needle),
+      )
+      .slice(0, 20)
+      .map((record) => ({
+        address: record.address,
+        state: record.state,
+        standard: record.standard,
+        method: record.classification?.method ?? null,
+        ...this.chainState(record.address),
+        basis: "chain",
+      }));
+  }
   activity(options = {}) {
+    if (options.collection) this.assertVisible(options.collection);
     const params = [],
       where = ["a.kind='activity'"];
+    where.push(`${j("a", "collection")} IN (SELECT value FROM json_each(?))`);
+    params.push(JSON.stringify(this.visibleAddresses()));
     for (const key of ["collection", "tokenId", "type"])
       if (options[key] != null) {
         where.push(`${j("a", key)}=?`);
@@ -463,6 +617,7 @@ export class Catalog {
         )
         .slice(0, 20),
       tokens: this.tokens(null, { q, limit: 20 }).items,
+      discoveredCollections: this.discoveredCollections(q),
     };
   }
   stats(collection, { currency, days = 7 } = {}) {

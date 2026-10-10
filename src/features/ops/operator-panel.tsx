@@ -13,11 +13,18 @@ type Report = {
   status: string;
   body: { collection: string; tokenId?: string; reason: string };
 };
+type CoverageReport = {
+  counts?: Record<string, number>;
+  unsupported?: Array<{ address: string; reason?: string | null }>;
+  quarantined?: Array<{ address: string; observations?: number; lastError?: string | null }>;
+  gaps?: Array<{ address?: string; from: number; to: number; reason: string }>;
+};
 export function OperatorPanel() {
   const [busy, setBusy] = useState(false);
   const [loadingReports, setLoadingReports] = useState(false);
   const [key, setKey] = useState(""),
     [reports, setReports] = useState<Report[]>([]),
+    [coverage, setCoverage] = useState<CoverageReport | null>(null),
     [message, setMessage] = useState("");
   const [collection, setCollection] = useState(""),
     [reason, setReason] = useState("");
@@ -63,6 +70,14 @@ export function OperatorPanel() {
       setLoadingReports(false);
     }
   }
+  async function loadCoverage() {
+    try {
+      setCoverage(await operator("coverage"));
+      setMessage("Coverage loaded.");
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Coverage request failed.");
+    }
+  }
   return (
     <fieldset disabled={busy} className="min-w-0 space-y-5">
       <Card>
@@ -78,12 +93,62 @@ export function OperatorPanel() {
             onChange={(e) => setKey(e.target.value)}
             autoComplete="off"
           />
-          <Button disabled={!key} onClick={() => void load()}>
-            Load reports
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={!key} onClick={() => void load()}>
+              Load reports
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!key}
+              onClick={() => void loadCoverage()}
+            >
+              Load coverage
+            </Button>
+          </div>
           <p role="status" className="text-sm">
             {busy ? "Working…" : message}
           </p>
+          {coverage && (
+            <div
+              className="space-y-2 rounded border p-3 text-xs"
+              data-testid="operator-coverage-summary"
+            >
+              <h3 className="text-sm font-medium">Chain discovery coverage</h3>
+              {coverage.counts && (
+                <div className="flex flex-wrap gap-3">
+                  {Object.entries(coverage.counts).map(([state, count]) => (
+                    <span key={state} className="rounded border px-2 py-0.5">
+                      {state}: {count}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {coverage.unsupported && coverage.unsupported.length > 0 && (
+                <div className="space-y-1">
+                  <p className="font-medium text-muted-foreground">
+                    Unsupported contracts ({coverage.unsupported.length})
+                  </p>
+                  {coverage.unsupported.map((u) => (
+                    <p key={u.address} className="font-mono break-all">
+                      {u.address} · {u.reason ?? "unclassified"}
+                    </p>
+                  ))}
+                </div>
+              )}
+              {coverage.quarantined && coverage.quarantined.length > 0 && (
+                <div className="space-y-1">
+                  <p className="font-medium text-muted-foreground">
+                    Quarantined collections ({coverage.quarantined.length})
+                  </p>
+                  {coverage.quarantined.map((q) => (
+                    <p key={q.address} className="font-mono break-all">
+                      {q.address} · {q.lastError ?? "quarantined"}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {loadingReports && reports.length === 0 && (
             <ListSkeleton label="Loading reports" compact />
           )}

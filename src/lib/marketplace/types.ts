@@ -1,5 +1,17 @@
 import type { ApiOrder } from "@biblio/marketplace";
-export type {ApiToken,ApiOrder,ApiCollection,ApiPage,IndexStatus,MarketConfig} from "@biblio/marketplace";
+export type {
+  ApiToken,
+  ApiOrder,
+  ApiCollection,
+  ApiBalance,
+  ApiPage,
+  IndexStatus,
+  MarketConfig,
+  DiscoveredCollection,
+  SearchResults,
+  CollectionCoverage,
+  CollectionChainState,
+} from "@biblio/marketplace";
 export type NormalizedToken = {
   contract_address: string;
   token_id: string;
