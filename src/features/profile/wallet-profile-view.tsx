@@ -28,6 +28,7 @@ type WalletProfileViewProps = {
 
 type PortfolioItem = {
   collectionAddress: string;
+  collectionNameHint?: string;
   tokenId: string;
   balance: string;
 };
@@ -36,6 +37,7 @@ type CollectionGroup = {
   collectionAddress: string;
   collectionName: string;
   projectId?: string;
+  isConfigured: boolean;
   tokenIds: string[];
 };
 
@@ -45,6 +47,7 @@ const DENSITY_OPTIONS: ReadonlyArray<readonly [GridDensityMode, string]> = [
   ["compact", "Compact"],
 ];
 const ALL_COLLECTIONS_VALUE = "__all_collections__";
+const SUPPORTED_COLLECTIONS_VALUE = "__supported_collections__";
 
 function asRecord(value: unknown) {
   return value && typeof value === "object"
@@ -56,6 +59,42 @@ type ConfiguredCollectionDetails = {
   name: string;
   projectId?: string;
 };
+
+/**
+ * Pre-1-to-7-split Golden Token contract on Starknet Mainnet (#86).
+ * Exclude deprecated pre-split holdings so only active post-split Golden Tokens
+ * (0x027838dea749f41c6f8a44fcfa791788e6101080c1b3cd646a361f653ad10e2d) are shown.
+ */
+const DEPRECATED_PORTFOLIO_COLLECTION_ADDRESSES = new Set<string>([
+  normalizeMarketplaceAddress(
+    "0x04f5e296c805126637552cf3930e857f380e7c078e8f00696de4fc8545356b1d",
+  ),
+]);
+
+/**
+ * Known Starknet ecosystem NFT collection names for human-readable portfolio
+ * dropdown labels when an item is not part of the active trading registry (#87).
+ */
+const KNOWN_ECOSYSTEM_COLLECTION_NAMES = new Map<string, string>([
+  [
+    normalizeMarketplaceAddress(
+      "0x02d66679de61a5c6d57afd21e005a8c96118bd60315fd79a4521d68f5e5430d1",
+    ),
+    "Pixel Banners (for Adventurers)",
+  ],
+  [
+    normalizeMarketplaceAddress(
+      "0x057675b9c0bd62b096a2e15502a37b290fa766ead21c33eda42993e48a714b80",
+    ),
+    "Eternum Season 0 Pass",
+  ],
+  [
+    normalizeMarketplaceAddress(
+      "0x0539f522b29ae9251dbf7443c7a950cf260372e69efab3710a11bf17a9599f1",
+    ),
+    "Blobert",
+  ],
+]);
 
 function parsePortfolioItems(data: unknown): PortfolioItem[] {
   const page = asRecord(asRecord(data)?.page);
@@ -72,9 +111,22 @@ function parsePortfolioItems(data: unknown): PortfolioItem[] {
       (typeof record.contract_address === "string" && record.contract_address) ||
       (typeof record.contractAddress === "string" && record.contractAddress) ||
       null;
+    const collectionNameHint =
+      (typeof record.collection_name === "string" && record.collection_name) ||
+      (typeof record.collectionName === "string" && record.collectionName) ||
+      (typeof record.contract_name === "string" && record.contract_name) ||
+      undefined;
     const tokenId = formatNumberish(record.token_id ?? record.tokenId);
     const balance = formatNumberish(record.balance) ?? "0";
     if (!collectionAddress || !tokenId) continue;
+
+    if (
+      DEPRECATED_PORTFOLIO_COLLECTION_ADDRESSES.has(
+        normalizeMarketplaceAddress(collectionAddress),
+      )
+    ) {
+      continue;
+    }
 
     try {
       if (BigInt(balance) <= BigInt(0)) {
@@ -86,6 +138,7 @@ function parsePortfolioItems(data: unknown): PortfolioItem[] {
 
     items.push({
       collectionAddress,
+      collectionNameHint,
       tokenId,
       balance,
     });
@@ -109,10 +162,16 @@ function groupByCollection(
     }
 
     const configuredCollection = configuredCollectionsByAddress.get(normalizedAddress);
+    const ecosystemName = KNOWN_ECOSYSTEM_COLLECTION_NAMES.get(normalizedAddress);
     map.set(normalizedAddress, {
       collectionAddress: item.collectionAddress,
-      collectionName: configuredCollection?.name ?? item.collectionAddress,
+      collectionName:
+        configuredCollection?.name ??
+        item.collectionNameHint ??
+        ecosystemName ??
+        item.collectionAddress,
       projectId: configuredCollection?.projectId,
+      isConfigured: Boolean(configuredCollection),
       tokenIds: [item.tokenId],
     });
   }
@@ -181,16 +240,19 @@ export function WalletProfileView({
     const normalized = deferredFilter.trim().toLowerCase();
 
     return collections
-      .filter(
-        ({ collectionAddress }) =>
-          selectedCollection === ALL_COLLECTIONS_VALUE ||
+      .filter(({ collectionAddress, isConfigured }) => {
+        if (selectedCollection === ALL_COLLECTIONS_VALUE) return true;
+        if (selectedCollection === SUPPORTED_COLLECTIONS_VALUE) return isConfigured;
+        return (
           normalizeMarketplaceAddress(collectionAddress) ===
-            normalizeMarketplaceAddress(selectedCollection),
-      )
-      .map(({ collectionAddress, collectionName, projectId, tokenIds }) => ({
+          normalizeMarketplaceAddress(selectedCollection)
+        );
+      })
+      .map(({ collectionAddress, collectionName, projectId, isConfigured, tokenIds }) => ({
         collectionAddress,
         collectionName,
         projectId,
+        isConfigured,
         tokenIds:
           normalized.length === 0 ||
           collectionName.toLowerCase().includes(normalized)
@@ -258,6 +320,9 @@ export function WalletProfileView({
                 <SelectContent>
                   <SelectItem value={ALL_COLLECTIONS_VALUE}>
                     All collections
+                  </SelectItem>
+                  <SelectItem value={SUPPORTED_COLLECTIONS_VALUE}>
+                    Supported collections only
                   </SelectItem>
                   {collectionOptions.map((collection) => (
                     <SelectItem key={collection.value} value={collection.value}>
