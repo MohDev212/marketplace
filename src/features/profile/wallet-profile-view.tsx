@@ -60,6 +60,42 @@ type ConfiguredCollectionDetails = {
   projectId?: string;
 };
 
+/**
+ * Pre-1-to-7-split Golden Token contract on Starknet Mainnet (#86).
+ * Exclude deprecated pre-split holdings so only active post-split Golden Tokens
+ * (0x027838dea749f41c6f8a44fcfa791788e6101080c1b3cd646a361f653ad10e2d) are shown.
+ */
+const DEPRECATED_PORTFOLIO_COLLECTION_ADDRESSES = new Set<string>([
+  normalizeMarketplaceAddress(
+    "0x04f5e296c805126637552cf3930e857f380e7c078e8f00696de4fc8545356b1d",
+  ),
+]);
+
+/**
+ * Known Starknet ecosystem NFT collection names for human-readable portfolio
+ * dropdown labels when an item is not part of the active trading registry (#87).
+ */
+const KNOWN_ECOSYSTEM_COLLECTION_NAMES = new Map<string, string>([
+  [
+    normalizeMarketplaceAddress(
+      "0x02d66679de61a5c6d57afd21e005a8c96118bd60315fd79a4521d68f5e5430d1",
+    ),
+    "Pixel Banners (for Adventurers)",
+  ],
+  [
+    normalizeMarketplaceAddress(
+      "0x057675b9c0bd62b096a2e15502a37b290fa766ead21c33eda42993e48a714b80",
+    ),
+    "Eternum Season 0 Pass",
+  ],
+  [
+    normalizeMarketplaceAddress(
+      "0x0539f522b29ae9251dbf7443c7a950cf260372e69efab3710a11bf17a9599f1",
+    ),
+    "Blobert",
+  ],
+]);
+
 function parsePortfolioItems(data: unknown): PortfolioItem[] {
   const page = asRecord(asRecord(data)?.page);
   const balances = Array.isArray(page?.balances)
@@ -78,10 +114,19 @@ function parsePortfolioItems(data: unknown): PortfolioItem[] {
     const collectionNameHint =
       (typeof record.collection_name === "string" && record.collection_name) ||
       (typeof record.collectionName === "string" && record.collectionName) ||
+      (typeof record.contract_name === "string" && record.contract_name) ||
       undefined;
     const tokenId = formatNumberish(record.token_id ?? record.tokenId);
     const balance = formatNumberish(record.balance) ?? "0";
     if (!collectionAddress || !tokenId) continue;
+
+    if (
+      DEPRECATED_PORTFOLIO_COLLECTION_ADDRESSES.has(
+        normalizeMarketplaceAddress(collectionAddress),
+      )
+    ) {
+      continue;
+    }
 
     try {
       if (BigInt(balance) <= BigInt(0)) {
@@ -117,11 +162,13 @@ function groupByCollection(
     }
 
     const configuredCollection = configuredCollectionsByAddress.get(normalizedAddress);
+    const ecosystemName = KNOWN_ECOSYSTEM_COLLECTION_NAMES.get(normalizedAddress);
     map.set(normalizedAddress, {
       collectionAddress: item.collectionAddress,
       collectionName:
         configuredCollection?.name ??
         item.collectionNameHint ??
+        ecosystemName ??
         item.collectionAddress,
       projectId: configuredCollection?.projectId,
       isConfigured: Boolean(configuredCollection),

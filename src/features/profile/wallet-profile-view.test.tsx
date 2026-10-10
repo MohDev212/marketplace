@@ -357,6 +357,48 @@ describe("WalletProfileView", () => {
     expect(screen.getByText("Golden Token")).toBeVisible();
     expect(screen.queryByText("Discovered Loot")).toBeNull();
   });
+
+  it("excludes_deprecated_pre_split_golden_tokens_and_resolves_ecosystem_names", async () => {
+    const user = userEvent.setup();
+    mockUseWalletPortfolioQuery.mockReturnValue({
+      data: {
+        page: {
+          balances: [
+            {
+              contract_address:
+                "0x04f5e296c805126637552cf3930e857f380e7c078e8f00696de4fc8545356b1d",
+              token_id: "11",
+              balance: "1",
+            },
+            {
+              contract_address:
+                "0x539f522b29ae9251dbf7443c7a950cf260372e69efab3710a11bf17a9599f1",
+              token_id: "5",
+              balance: "1",
+            },
+          ],
+        },
+      },
+      status: "ready",
+      error: null,
+      isFetching: false,
+      refresh: vi.fn(),
+    });
+
+    render(<WalletProfileView address="0xabc123" />);
+
+    expect(screen.getByText("Blobert")).toBeVisible();
+    expect(
+      screen.queryByText(
+        /0x0?4f5e296c805126637552cf3930e857f380e7c078e8f00696de4fc8545356b1d/i,
+      ),
+    ).toBeNull();
+
+    await user.click(
+      screen.getByRole("combobox", { name: /filter by collection/i }),
+    );
+    expect(screen.getByRole("option", { name: "Blobert" })).toBeVisible();
+  });
 });
 
 vi.mock("@starknet-react/core",()=>({useAccount:()=>({address:undefined})}));
